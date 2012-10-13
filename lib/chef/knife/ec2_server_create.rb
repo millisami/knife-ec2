@@ -80,6 +80,10 @@ class Chef
         :description => "The Chef node name for your new node",
         :proc => Proc.new { |key| Chef::Config[:knife][:chef_node_name] = key }
 
+      option :chef_node_name_prefix,
+        :long => "--node-name-prefix PREFIX",
+        :description => "The Chef node prefix for your new node, the node name will have the server id appended"
+
       option :ssh_key_name,
         :short => "-S KEY",
         :long => "--ssh-key KEY",
@@ -228,7 +232,11 @@ class Chef
 
         # Always set the Name tag
         unless hashed_tags.keys.include? "Name"
-          hashed_tags["Name"] = node_name(server)
+          if( locate_config_value(:chef_node_name_prefix) )
+            hashed_tags["Name"] = "#{ locate_config_value(:chef_node_name_prefix) }#{ server.id }"
+          else
+            hashed_tags["Name"] = locate_config_value(:chef_node_name) || server.id
+          end
         end
 
         hashed_tags.each_pair do |key,val|
