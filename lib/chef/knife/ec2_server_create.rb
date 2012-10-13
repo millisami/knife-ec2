@@ -180,29 +180,12 @@ class Chef
         :proc => Proc.new { |m| Chef::Config[:knife][:aws_user_data] = m },
         :default => nil
 
-      Chef::Config[:knife][:hints] ||= {"ec2" => {}}
-      option :hint,
-        :long => "--hint HINT_NAME[=HINT_FILE]",
-        :description => "Specify Ohai Hint to be set on the bootstrap target.  Use multiple --hint options to specify multiple hints.",
-        :proc => Proc.new { |h|
-           name, path = h.split("=")
-           Chef::Config[:knife][:hints][name] = path ? JSON.parse(::File.read(path)) : Hash.new
-        }
+      option :elastic_ip,
+        :long => "--elastic-ip IP-ADDRESS",
+        :description => "bind an elastic ip before bootstrapping"
 
-      option :ephemeral,
-        :long => "--ephemeral EPHEMERAL_DEVICES",
-        :description => "Comma separated list of device locations (eg - /dev/sdb) to map ephemeral devices",
-        :proc => lambda { |o| o.split(/[\s,]+/) },
-        :default => []
-
-      option :server_connect_attribute,
-        :long => "--server-connect-attribute ATTRIBUTE",
-        :short => "-a ATTRIBUTE",
-        :description => "The EC2 server attribute to use for SSH connection",
-        :default => nil
-
-      def tcp_test_ssh(hostname, ssh_port)
-        tcp_socket = TCPSocket.new(hostname, ssh_port)
+      def tcp_test_ssh(hostname)
+        tcp_socket = TCPSocket.new(hostname, config[:ssh_port])
         readable = IO.select([tcp_socket], nil, nil, 5)
         if readable
           Chef::Log.debug("sshd accepting connections on #{hostname}, banner is #{tcp_socket.gets}")
@@ -268,6 +251,13 @@ class Chef
 
         # wait for it to be ready to do stuff
         @server.wait_for { print "."; ready? }
+
+        if config[:elastic_ip]
+          elastic_ip = config[:elastic_ip]
+          print "\n#{ui.color("Switching to elastic ip", :magenta)}"
+          connection.associate_address(server.id, elastic_ip)
+          server.wait_for { print "."; public_ip_address == elastic_ip }
+        end
 
         puts("\n")
 
