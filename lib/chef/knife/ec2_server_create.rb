@@ -228,7 +228,7 @@ class Chef
 
         # Always set the Name tag
         unless hashed_tags.keys.include? "Name"
-          hashed_tags["Name"] = locate_config_value(:chef_node_name) || @server.id
+          hashed_tags["Name"] = node_name(server)
         end
 
         hashed_tags.each_pair do |key,val|
@@ -326,7 +326,7 @@ class Chef
         bootstrap.config[:ssh_port] = config[:ssh_port]
         bootstrap.config[:ssh_gateway] = config[:ssh_gateway]
         bootstrap.config[:identity_file] = config[:identity_file]
-        bootstrap.config[:chef_node_name] = locate_config_value(:chef_node_name) || server.id
+        bootstrap.config[:chef_node_name] = node_name(server)
         bootstrap.config[:prerelease] = config[:prerelease]
         bootstrap.config[:bootstrap_version] = locate_config_value(:bootstrap_version)
         bootstrap.config[:first_boot_attributes] = locate_config_value(:json_attributes) || {}
@@ -426,46 +426,11 @@ class Chef
         server_def
       end
 
-      def wait_for_sshd(hostname)
-        config[:ssh_gateway] ? wait_for_tunnelled_sshd(hostname) : wait_for_direct_sshd(hostname, config[:ssh_port])
-      end
-
-      def wait_for_tunnelled_sshd(hostname)
-        print(".")
-        print(".") until tunnel_test_ssh(ssh_connect_host) {
-          sleep @initial_sleep_delay ||= (vpc_mode? ? 40 : 10)
-          puts("done")
-        }
-      end
-
-      def tunnel_test_ssh(hostname, &block)
-        gw_host, gw_user = config[:ssh_gateway].split('@').reverse
-        gw_host, gw_port = gw_host.split(':')
-        gateway = Net::SSH::Gateway.new(gw_host, gw_user, :port => gw_port || 22)
-        status = false
-        gateway.open(hostname, config[:ssh_port]) do |local_tunnel_port|
-          status = tcp_test_ssh('localhost', local_tunnel_port, &block)
-        end
-        status
-      rescue SocketError, Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ENETUNREACH, IOError
-        sleep 2
-        false
-      rescue Errno::EPERM, Errno::ETIMEDOUT
-        false
-      end
-
-      def wait_for_direct_sshd(hostname, ssh_port)
-        print(".") until tcp_test_ssh(ssh_connect_host, ssh_port) {
-          sleep @initial_sleep_delay ||= (vpc_mode? ? 40 : 10)
-          puts("done")
-        }
-      end
-
-      def ssh_connect_host
-        @ssh_connect_host ||= if config[:server_connect_attribute]
-          server.send(config[:server_connect_attribute])
+      def node_name(server)
+        if( locate_config_value(:chef_node_name_prefix) )
+          return "#{ locate_config_value(:chef_node_name_prefix) }#{ server.id }"
         else
-          vpc_mode? ? server.private_ip_address : server.dns_name
+          return locate_config_value(:chef_node_name) || server.id
         end
       end
     end
