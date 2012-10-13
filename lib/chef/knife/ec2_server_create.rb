@@ -42,7 +42,8 @@ class Chef
         :short => "-f FLAVOR",
         :long => "--flavor FLAVOR",
         :description => "The flavor of server (m1.small, m1.medium, etc)",
-        :proc => Proc.new { |f| Chef::Config[:knife][:flavor] = f }
+        :proc => Proc.new { |f| Chef::Config[:knife][:flavor] = f },
+        :default => "m1.small"
 
       option :image,
         :short => "-I IMAGE",
@@ -72,13 +73,13 @@ class Chef
         :short => "-Z ZONE",
         :long => "--availability-zone ZONE",
         :description => "The Availability Zone",
+        :default => "us-east-1b",
         :proc => Proc.new { |key| Chef::Config[:knife][:availability_zone] = key }
 
       option :chef_node_name,
         :short => "-N NAME",
         :long => "--node-name NAME",
-        :description => "The Chef node name for your new node",
-        :proc => Proc.new { |key| Chef::Config[:knife][:chef_node_name] = key }
+        :description => "The Chef node name for your new node"
 
       option :chef_node_name_prefix,
         :long => "--node-name-prefix PREFIX",
@@ -108,13 +109,6 @@ class Chef
         :default => "22",
         :proc => Proc.new { |key| Chef::Config[:knife][:ssh_port] = key }
 
-      option :ssh_gateway,
-        :short => "-w GATEWAY",
-        :long => "--ssh-gateway GATEWAY",
-        :description => "The ssh gateway server",
-        :proc => Proc.new { |key| Chef::Config[:knife][:ssh_gateway] = key }
-
-
       option :identity_file,
         :short => "-i IDENTITY_FILE",
         :long => "--identity-file IDENTITY_FILE",
@@ -133,7 +127,8 @@ class Chef
         :short => "-d DISTRO",
         :long => "--distro DISTRO",
         :description => "Bootstrap a distro using a template; default is 'chef-full'",
-        :proc => Proc.new { |d| Chef::Config[:knife][:distro] = d }
+        :proc => Proc.new { |d| Chef::Config[:knife][:distro] = d },
+        :default => "chef-full"
 
       option :template_file,
         :long => "--template-file TEMPLATE",
@@ -147,25 +142,28 @@ class Chef
 
       option :ebs_no_delete_on_term,
         :long => "--ebs-no-delete-on-term",
-        :description => "Do not delete EBS volume on instance termination"
+        :description => "Do not delete EBS volumn on instance termination"
 
       option :run_list,
         :short => "-r RUN_LIST",
         :long => "--run-list RUN_LIST",
         :description => "Comma separated list of roles/recipes to apply",
-        :proc => lambda { |o| o.split(/[\s,]+/) }
+        :proc => lambda { |o| o.split(/[\s,]+/) },
+        :default => []
 
       option :json_attributes,
         :short => "-j JSON",
         :long => "--json-attributes JSON",
         :description => "A JSON string to be added to the first run of chef-client",
-        :proc => lambda { |o| JSON.parse(o) }
+        :proc => lambda { |o| JSON.parse(o) },
+        :default => {}
+
 
       option :subnet_id,
         :short => "-s SUBNET-ID",
         :long => "--subnet SUBNET-ID",
         :description => "create node in this Virtual Private Cloud Subnet ID (implies VPC mode)",
-        :proc => Proc.new { |key| Chef::Config[:knife][:subnet_id] = key }
+        :default => false
 
       option :host_key_verify,
         :long => "--[no-]host-key-verify",
@@ -194,10 +192,23 @@ class Chef
         else
           false
         end
-      rescue SocketError, Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ENETUNREACH, IOError
+      rescue SocketError
         sleep 2
         false
-      rescue Errno::EPERM, Errno::ETIMEDOUT
+      rescue Errno::ETIMEDOUT
+        false
+      rescue Errno::EPERM
+        false
+      rescue Errno::ECONNREFUSED
+        sleep 2
+        false
+      # This happens on EC2 quite often
+      rescue Errno::EHOSTUNREACH
+        sleep 2
+        false
+      # This happens on EC2 sometimes
+      rescue Errno::ENETUNREACH
+        sleep 2
         false
       ensure
         tcp_socket && tcp_socket.close
@@ -215,11 +226,7 @@ class Chef
 
         # Always set the Name tag
         unless hashed_tags.keys.include? "Name"
-          if( locate_config_value(:chef_node_name_prefix) )
-            hashed_tags["Name"] = "#{ locate_config_value(:chef_node_name_prefix) }#{ server.id }"
-          else
-            hashed_tags["Name"] = locate_config_value(:chef_node_name) || server.id
-          end
+          hashed_tags["Name"] = node_name(server)
         end
 
         hashed_tags.each_pair do |key,val|
@@ -272,9 +279,14 @@ class Chef
 
         print "\n#{ui.color("Waiting for sshd", :magenta)}"
 
-        wait_for_sshd(ssh_connect_host)
+        fqdn = vpc_mode? ? @server.private_ip_address : @server.dns_name
 
-        bootstrap_for_node(@server,ssh_connect_host).run
+        print(".") until tcp_test_ssh(fqdn) {
+          sleep @initial_sleep_delay ||= (vpc_mode? ? 40 : 10)
+          puts("done")
+        }
+
+        bootstrap_for_node(@server,fqdn).run
 
         puts "\n"
         msg_pair("Instance ID", @server.id)
@@ -312,23 +324,22 @@ class Chef
         end
         msg_pair("Private IP Address", @server.private_ip_address)
         msg_pair("Environment", config[:environment] || '_default')
-        msg_pair("Run List", (config[:run_list] || []).join(', '))
-        msg_pair("JSON Attributes",config[:json_attributes]) unless !config[:json_attributes] || config[:json_attributes].empty?
+        msg_pair("Run List", config[:run_list].join(', '))
+        msg_pair("JSON Attributes",config[:json_attributes]) unless config[:json_attributes].empty?
       end
 
-      def bootstrap_for_node(server,ssh_host)
+      def bootstrap_for_node(server,fqdn)
         bootstrap = Chef::Knife::Bootstrap.new
-        bootstrap.name_args = [ssh_host]
-        bootstrap.config[:run_list] = locate_config_value(:run_list) || []
+        bootstrap.name_args = [fqdn]
+        bootstrap.config[:run_list] = config[:run_list]
         bootstrap.config[:ssh_user] = config[:ssh_user]
         bootstrap.config[:ssh_port] = config[:ssh_port]
-        bootstrap.config[:ssh_gateway] = config[:ssh_gateway]
         bootstrap.config[:identity_file] = config[:identity_file]
         bootstrap.config[:chef_node_name] = node_name(server)
         bootstrap.config[:prerelease] = config[:prerelease]
         bootstrap.config[:bootstrap_version] = locate_config_value(:bootstrap_version)
-        bootstrap.config[:first_boot_attributes] = locate_config_value(:json_attributes) || {}
-        bootstrap.config[:distro] = locate_config_value(:distro) || "chef-full"
+        bootstrap.config[:first_boot_attributes] = config[:json_attributes]
+        bootstrap.config[:distro] = locate_config_value(:distro)
         bootstrap.config[:use_sudo] = true unless config[:ssh_user] == 'root'
         bootstrap.config[:template_file] = locate_config_value(:template_file)
         bootstrap.config[:environment] = config[:environment]
@@ -340,7 +351,7 @@ class Chef
       def vpc_mode?
         # Amazon Virtual Private Cloud requires a subnet_id. If
         # present, do a few things differently
-        !!locate_config_value(:subnet_id)
+        !!config[:subnet_id]
       end
 
       def ami
@@ -376,12 +387,12 @@ class Chef
         server_def = {
           :image_id => locate_config_value(:image),
           :groups => config[:security_groups],
-          :security_group_ids => locate_config_value(:security_group_ids),
+          :security_group_ids => config[:security_group_ids],
           :flavor_id => locate_config_value(:flavor),
           :key_name => Chef::Config[:knife][:aws_ssh_key_id],
           :availability_zone => locate_config_value(:availability_zone)
         }
-        server_def[:subnet_id] = locate_config_value(:subnet_id) if vpc_mode?
+        server_def[:subnet_id] = config[:subnet_id] if config[:subnet_id]
 
         if Chef::Config[:knife][:aws_user_data]
           begin
@@ -415,10 +426,6 @@ class Chef
                'Ebs.VolumeSize' => ebs_size,
                'Ebs.DeleteOnTermination' => delete_term
              }]
-        end
-
-        (config[:ephemeral] || []).each_with_index do |device_name, i|
-          server_def[:block_device_mapping] = (server_def[:block_device_mapping] || []) << {'VirtualName' => "ephemeral#{i}", 'DeviceName' => device_name}
         end
 
         server_def
